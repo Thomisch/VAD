@@ -3,47 +3,84 @@ import librosa
 import soundfile as sf
 import numpy as np
 from tqdm import tqdm
+import shutil
+import gdown
+import tarfile
 
 # 📌 Chemins d'entrée et sortie
 LIBRISPEECH_PATH = "LibriSpeech/train-clean-100/"  # Dossier contenant les fichiers FLAC
-OUTPUT_PATH = "processed_data/"  # Dossier des fichiers traités
+WORKING_PATH = "temp_wav/"  # Dossier temporaire pour les fichiers WAV
+OUTPUT_PATH = "processed_data/"  # Dossier des fichiers extraits
 VOICE_PATH = os.path.join(OUTPUT_PATH, "voix")
-SILENCE_PATH = os.path.join(OUTPUT_PATH, "silence")
 
 # 📌 Paramètres audio
 TARGET_SR = 16000  # Fréquence cible 16kHz
 MIN_PHRASE_DURATION = 2.0  # Durée minimale d'une phrase (sec)
 MAX_PHRASE_DURATION = 10.0  # Durée max d'une phrase (sec)
 SILENCE_THRESHOLD = 20  # Seuil en dB pour détecter le silence
-PAUSE_DURATION = 0.5  # Durée min d'un silence pour marquer la fin d'une phrase (sec)
 
-# ✅ Création des dossiers de sortie
-os.makedirs(VOICE_PATH, exist_ok=True)
-os.makedirs(SILENCE_PATH, exist_ok=True)
+# ✅ Création des dossiers
+os.makedirs(WORKING_PATH, exist_ok=True)  # Dossier temporaire pour WAV
+os.makedirs(VOICE_PATH, exist_ok=True)  # Dossier final pour les phrases
 
-def extract_phrases(file_path):
-    """Détecte les phrases en fonction du silence et extrait des fichiers audio."""
-    y, sr = librosa.load(file_path, sr=TARGET_SR, mono=True)  # Chargement audio
-    
-    # Détection des silences (retourne les intervalles de voix détectées)
+def download_librispeech():
+    """Télécharge et extrait le dataset LibriSpeech train-clean-100"""
+    url = 'https://drive.google.com/uc?id=1g0EdL4AFKMkkFIt1RE1V_1lmAqDizjr4'  # Lien vers le dataset train-clean-100
+    output = 'librispeech_train_clean_100.tar.gz'  # Fichier compressé
+    if not os.path.exists(LIBRISPEECH_PATH):  # Si le dataset n'est pas déjà téléchargé
+        print("Téléchargement de LibriSpeech train-clean-100...")
+        gdown.download(url, output, quiet=False)
+        
+        # Décompression du fichier téléchargé
+        print("Décompression du dataset...")
+        with tarfile.open(output, "r:gz") as tar:
+            tar.extractall(path="LibriSpeech")
+        
+        # Supprimer l'archive une fois décompressée
+        os.remove(output)
+    else:
+        print("Le dataset est déjà présent.")
+
+def convert_flac_to_wav(flac_path, wav_path):
+    """Convertit un fichier FLAC en WAV 16kHz mono"""
+    y, sr = librosa.load(flac_path, sr=TARGET_SR, mono=True)
+    sf.write(wav_path, y, TARGET_SR)
+
+def extract_phrases(wav_path):
+    """Détecte et extrait des phrases basées sur le silence"""
+    y, sr = librosa.load(wav_path, sr=TARGET_SR, mono=True)
     intervals = librosa.effects.split(y, top_db=SILENCE_THRESHOLD)
-
+    
     phrases = []
     for start, end in intervals:
-        duration = (end - start) / sr  # Convertir en secondes
+        duration = (end - start) / sr
         if MIN_PHRASE_DURATION <= duration <= MAX_PHRASE_DURATION:
             phrases.append(y[start:end])
-
+    
     return phrases
 
-# 🔄 Traitement des fichiers
+# 📥 Télécharger le dataset LibriSpeech si nécessaire
+download_librispeech()
+
+# 🔄 Sélection de 200 fichiers FLAC
 flac_files = [os.path.join(root, f) for root, _, files in os.walk(LIBRISPEECH_PATH) for f in files if f.endswith(".flac")]
+flac_files = flac_files[:200]  # Limiter à 200 fichiers pour la gestion de l'espace
 
-for file_path in tqdm(flac_files[:200]):  # Limite à 200 fichiers pour éviter surcharge
-    phrases = extract_phrases(file_path)
+for flac_file in tqdm(flac_files, desc="Processing Audio"):
+    # Étape 1 : Convertir FLAC → WAV temporaire
+    wav_temp = os.path.join(WORKING_PATH, os.path.basename(flac_file).replace(".flac", ".wav"))
+    convert_flac_to_wav(flac_file, wav_temp)
 
+    # Étape 2 : Extraire les phrases et les sauvegarder
+    phrases = extract_phrases(wav_temp)
     for i, phrase in enumerate(phrases):
-        # Sauvegarde les extraits de phrase détectés
-        sf.write(f"{VOICE_PATH}/phrase_{os.path.basename(file_path).replace('.flac', '')}_{i}.wav", phrase, TARGET_SR)
+        phrase_path = os.path.join(VOICE_PATH, f"phrase_{os.path.basename(flac_file).replace('.flac', '')}_{i}.wav")
+        sf.write(phrase_path, phrase, TARGET_SR)
 
-print("✅ Extraction des phrases terminée !")
+    # Étape 3 : Supprimer le fichier WAV temporaire pour économiser l’espace
+    os.remove(wav_temp)
+
+# 🔥 Suppression du dossier temporaire (sécurité)
+shutil.rmtree(WORKING_PATH, ignore_errors=True)
+
+print("✅ Extraction terminée ! Les fichiers sont dans 'processed_data/voix/'")
